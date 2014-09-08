@@ -1,0 +1,149 @@
+<?php
+/**
+ * CercecUser
+ *
+ * @author Marc Elie <marc.elie77@gmail.com>
+ *
+ * Event: OnUserFormSave
+ *
+ * Modified from Bob Ray's plugin tutorial, Official Guide p. 492-3
+ * and Bob Ray's online explanation on create class:
+ * http://forums.modx.com/thread/74440/problem-with-creating-modresource-programmatically
+ * http://forums.modx.com/thread/44067/revolution-create-a-folder-based-on-newly-registered-username
+ * and Elastic's AutoClientArea
+ * https://gist.github.com/788179
+ * and http://forums.modx.com/thread/72291/solved-snippet-adds-user-to-group-but-needs-to-flush-permissions
+ *
+ * When the User creation form is saved:
+ * 1. Add the user to his own User Groups (UG) and to Membres UG
+ * 2. Create a resource named after the user
+ * 3. Add this resource to Resource Groups (RG): site construction RG & user RG (create it)
+ * 4. Create a tree_root_id on this resource
+ * 5. Create a user directory
+ * 6. Create ACL for user UG's access to user RG: context (web & mgr) and resource
+ */
+
+/* create mode  */
+if($mode != modSystemEvent::MODE_NEW) { 
+  $modx->log(xPDO::LOG_LEVEL_ERROR,'****0. Quit: we are in update mode.');
+  return; 
+} else { $modx->log(xPDO::LOG_LEVEL_ERROR,'****0. We are in create mode.');}
+
+/* variables */
+$user = $modx->getObject('modUser',$id);
+$userName = $user->get('username');
+$parentId = 88; // Les membres
+$templateId = 7; // centre-membres
+$userGroupId = 6; // Membres
+$userGroupObject = $modx->getObject('modUserGroup', array('id'=>6));
+$standardRGId = 3; // ressources_protegees_pdt_construction
+$userGroupName = $userGroupObject->get('name');
+$roleId = 1; // = Member, authority = 9999
+$resGroupId = 3; // ressources_protegees_pdt_construction
+$editeursUGId = 3; // Editeurs en chef
+
+/* 1. Set UserGroup belonging */
+/*   a) User --> His own User Group 'userNameUG' */
+$mbUG = $modx->newObject('modUserGroup');
+$mbUG->set('name',$userName."UG");
+$mbUG->set('parent',$userGroupId);
+$mbUG->set('description',$userName."'s User Group");
+if($mbUG->save() == true) {
+  $modx->log(xPDO::LOG_LEVEL_ERROR,'1. a) User Group created: '.$mbUG->get('id'));
+} else {$modx->log(xPDO::LOG_LEVEL_ERROR,'1. a) User Group not created.');}
+$mbUGName = $mbUG->get('name');
+$mbUGId = $mbUG->get('id');
+if($user->joinGroup($mbUGId, $roleId == true)) {
+  $modx->log(xPDO::LOG_LEVEL_ERROR,'1. b) User joined UG: '.$mbUGName);
+} else {$modx->log(xPDO::LOG_LEVEL_ERROR,'1. b) User failed to join UG: '.$mbUGName);}
+/*   b) User --> Member User Group */
+if($user->isMember($userGroupName) == false) { 
+  $user->joinGroup($userGroupId, $roleId);
+		$modx->log(xPDO::LOG_LEVEL_ERROR,'1. c) User rejoined: '.$userGroupName);
+} else { $modx->log(xPDO::LOG_LEVEL_ERROR,'1. c) User Group is already set: '.$userGroupName); }
+
+/* 2. Create resource using the create class */
+/* Get fullname of user */
+$userProfile = $user->getOne('Profile');
+$completeName = $userProfile->get('fullname');
+/* If there is no fullname, use name. Don't use isset here, use empty */
+$title = (empty($completeName)) ? $userName : $completeName;
+/* Create corresponding resource */
+$fields['createdby'] = $modx->user->id;
+$fields['parent'] = $parentId;
+$fields['template'] = $templateId;
+$fields['pagetitle'] = $title;
+$fields['published'] = 0;
+if( !$modx->getObject('modResource', array('pagetitle'=>$fields['pagetitle'])) ) {
+		$response = $modx->runProcessor('resource/create', $fields);
+		$object = $response->getObject();
+  $docId = $object['id'];
+		$modx->log(xPDO::LOG_LEVEL_ERROR,'2. Resource created: '.$docId);
+} else { 
+  $modx->log(xPDO::LOG_LEVEL_ERROR,'2. Resource with pagetitle '.$userName.' already exists');
+		return;}
+
+/* 3. Create user's own RG and join his resource to this RG */
+$res = $modx->getObject('modResource',array('id'=>$docId));
+$mbRG = $modx->newObject('modResourceGroup');
+$mbRG->set('name',$userName.'RG');
+$mbRG->save();
+$mbRGName = $mbRG->get('name');
+$mbRGId = $mbRG->get('id');
+if ($res->joinGroup($mbRGId) == true) {
+  $modx->log(xPDO::LOG_LEVEL_ERROR,'3. Member resource joined RG: '.$mbRGName);
+} else { $modx->log(xPDO::LOG_LEVEL_ERROR,'3. Member resource could not join RG: '.$mbRGName); }
+
+/* 4. Set the tree_root_id at the id of the new resource */
+$setting =& $modx->newObject('modUserSetting');
+$setting->set('user',$id);
+$setting->set('key','tree_root_id');
+$setting->set('value',$docId);
+$setting->set('namespace','core');
+$treeRoot = $modx->getObject('modUserSetting',array('user'=>$id,'key'=>'tree_root_id'));
+if(isset($treeRoot)) { $modx->log(xPDO::LOG_LEVEL_ERROR,'4. Tree root id already exists'); 
+} else {
+  if($setting->save() == true) {$modx->log(xPDO::LOG_LEVEL_ERROR,'4. Tree root id created: '.$docId);}
+		}
+
+/* 5. Create a new directory */
+$dir = (boolean)$modx->getOption('filemanager_path_relative',null,false) ? $modx->getOption('base_path') : '';
+$dir .= $modx->getOption('filemanager_path',null,'').'materiaux/doc_membres/'.$userName;
+$folder_permissions = octdec('755');
+if (!@mkdir($dir,$folder_permissions)) {
+    $modx->log(modX::LOG_LEVEL_ERROR,'5. Could not create user directory: '.$dir);
+} else {$modx->log(modX::LOG_LEVEL_ERROR,'5. Directory created: '.$dir);}
+
+/* 6. Add access of mbUG to mbRG */
+/*   a) Resource -- mbRG -- mgr -- Policy: Context */
+$mbUG2mbRG1 = $modx->newObject('modAccessResourceGroup');
+$mbUG2mbRG1->fromArray(array(
+  'principal' => $mbUGId,
+		'principal_class' => 'modUserGroup',
+		'target' => $mbRGId,
+		'authority' => 9999,
+		'policy' => 12,
+		'context_key' => 'mgr',
+));
+if ($mbUG2mbRG1->save() == false) {
+  $modx->log(modX::LOG_LEVEL_ERROR,'6-1. Could not create access to RG');
+} else {$modx->log(modX::LOG_LEVEL_ERROR,'6-1. Access to RG created');}
+/*   b) FOR EDITEURS EN CHEF: Resource -- userNameRG -- mgr  */
+/*   Otherwise the managers can't edit the user's resource */
+$mbUG2mbRG2 = $modx->newObject('modAccessResourceGroup');
+$mbUG2mbRG2->fromArray(array(
+  'principal' => $editeursUGId,
+		'principal_class' => 'modUserGroup',
+		'target' => $mbRGId,
+		'authority' => 9999,
+		'policy' => 1,
+		'context_key' => 'mgr',
+));
+if ($mbUG2mbRG2->save() == false) {
+  $modx->log(modX::LOG_LEVEL_ERROR,'6-2. Could not create access to RG');
+} else {$modx->log(modX::LOG_LEVEL_ERROR,'6-2. Access to RG created');}
+
+/* LAST: flush the permissions of the manager for him to see the newly created resource */
+$modx->user->getAttributes(array(), '', true);
+
+return;
